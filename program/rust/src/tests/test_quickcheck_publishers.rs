@@ -57,7 +57,7 @@ impl pc_price_t {
 impl Arbitrary for pc_pub_key_t {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut array = [0u64; 4];
-        for i in 0..3 {
+        for i in 0..4 {
             array[i] = u64::arbitrary(g);
         }
         return pc_pub_key_t { k8_: array };
