@@ -4,8 +4,10 @@ use std::mem::size_of;
 use crate::c_oracle_header::{
     cmd_del_publisher,
     command_t_e_cmd_del_publisher,
+    pc_price_comp,
     pc_price_t,
     pc_pub_key_t,
+    PythAccount,
     PC_COMP_SIZE,
     PC_VERSION,
 };
@@ -22,7 +24,6 @@ use quickcheck::{
     Gen,
 };
 use quickcheck_macros::quickcheck;
-use rand::Rng;
 use solana_program::program_error::ProgramError;
 use solana_program::pubkey::Pubkey;
 use std::fmt::{
@@ -34,7 +35,7 @@ use std::fmt::{
 #[derive(Clone, Debug)]
 enum Operation {
     Add(pc_pub_key_t),
-    Delete,
+    Delete(usize),
 }
 
 impl Debug for pc_pub_key_t {
@@ -66,15 +67,17 @@ impl Arbitrary for pc_pub_key_t {
 impl Arbitrary for Operation {
     fn arbitrary(g: &mut Gen) -> Self {
         let sample = u8::arbitrary(g);
-        match sample % 3 {
+        match sample % 2 {
             0 => {
                 return Operation::Add(pc_pub_key_t::arbitrary(g));
             }
             1 => {
-                return Operation::Add(pc_pub_key_t::arbitrary(g));
-            }
-            2 => {
-                return Operation::Delete;
+                let mut pos = u8::arbitrary(g);
+                // Reroll until pos < PC_COMP_SIZE
+                while pos >= PC_COMP_SIZE.try_into().unwrap() {
+                    pos = u8::arbitrary(g);
+                }
+                return Operation::Delete(pos as usize);
             }
             _ => panic!(),
         }
@@ -88,8 +91,13 @@ fn populate_data(instruction_data: &mut [u8], publisher: pc_pub_key_t) {
     hdr.pub_ = publisher;
 }
 
+/// This quickcheck test will generate a series of Vec<Operation>. For each vector
+/// each operation can be adding a publisher `pub_`
+/// or deleting the publisher at position `i` (or a random publisher if `i > price_data.num_`)
+/// A set is maintained with the publishers that should be authorized and the onchain struct
+/// and the set are compared after each operation.
 #[quickcheck]
-fn prop(input: Vec<Operation>) -> bool {
+fn test_add_and_delete(input: Vec<Operation>) -> bool {
     let mut set: HashSet<[u64; 4]> = HashSet::new();
 
     let program_id = Pubkey::new_unique();
@@ -103,10 +111,10 @@ fn prop(input: Vec<Operation>) -> bool {
     let price_account = price_setup.to_account_info();
     initialize_checked::<pc_price_t>(&price_account, PC_VERSION).unwrap();
 
-    let mut rng = rand::thread_rng();
 
     for op in input {
         match op {
+            // Add the given pubkey
             Operation::Add(pub_) => {
                 populate_data(&mut instruction_data, pub_);
 
@@ -126,16 +134,20 @@ fn prop(input: Vec<Operation>) -> bool {
                     }
                 }
             }
-            Operation::Delete => {
+            // Delete the publisher at position pos
+            Operation::Delete(pos) => {
                 let pubkey_to_delete: pc_pub_key_t;
                 {
                     let price_data =
                         load_checked::<pc_price_t>(&price_account, PC_VERSION).unwrap();
-                    if price_data.num_ != 0 {
-                        let i: usize = rng.gen_range(0..(price_data.num_ as usize));
-                        pubkey_to_delete = price_data.comp_[i].pub_;
+
+                    if price_data.num_ as usize > pos {
+                        pubkey_to_delete = price_data.comp_[pos].pub_; // If within range, delete
+                                                                       // that publisher
                     } else {
-                        pubkey_to_delete = pc_pub_key_t::new_unique();
+                        pubkey_to_delete = pc_pub_key_t::new_unique(); // Else try deleting a
+                                                                       // publisher that's not in
+                                                                       // the array
                     }
                     populate_data(&mut instruction_data, pubkey_to_delete);
                 }
@@ -152,16 +164,18 @@ fn prop(input: Vec<Operation>) -> bool {
                         assert_eq!(err, ProgramError::InvalidArgument);
                         let price_data =
                             load_checked::<pc_price_t>(&price_account, PC_VERSION).unwrap();
-                        assert_eq!(price_data.num_, 0);
+                        assert!(price_data.num_ as usize <= pos);
                     }
                 }
             }
         }
         {
             let price_data = load_checked::<pc_price_t>(&price_account, PC_VERSION).unwrap();
-            if price_data.to_set() != set {
-                return false;
-            }
+            assert_eq!(price_data.to_set(), set);
+            assert_eq!(
+                price_data.size_ as usize,
+                (pc_price_t::INITIAL_SIZE as usize) + set.len() * size_of::<pc_price_comp>()
+            )
         }
     }
 
