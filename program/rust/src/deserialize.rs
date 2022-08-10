@@ -15,6 +15,9 @@ use solana_program::account_info::AccountInfo;
 use solana_program::program_error::ProgramError;
 
 /// Interpret the bytes in `data` as a value of type `T`
+/// This will fail if :
+/// - `data` is too short
+/// - `data` is not aligned for T
 pub fn load<T: Pod>(data: &[u8]) -> Result<&T, ProgramError> {
     try_from_bytes(
         data.get(0..size_of::<T>())
